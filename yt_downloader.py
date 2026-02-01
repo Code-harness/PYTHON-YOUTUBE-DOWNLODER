@@ -10,7 +10,7 @@ def clean_youtube_url(url):
         return f"https://www.youtube.com/watch?v={qs['v'][0]}"
     return url
 
-def download_video(url, folder):
+def download_video(url, folder,progress_callback=None):
     url = clean_youtube_url(url)
 
     if not url:
@@ -21,7 +21,8 @@ def download_video(url, folder):
         'merge_output_format': 'mp4',
         'outtmpl': os.path.join(folder, '%(title)s.%(ext)s'),
         'noplaylist': True,
-        'quiet': False
+        'quiet': False,
+        'progress_hooks': [progress_callback] if progress_callback else [],
     }
 
     with YoutubeDL(options) as ydl:
