@@ -11,7 +11,7 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("TubeStream Downloader v2.0")
+        self.title("TubeStream Downloader v1.0")
         self.geometry("700x450")
 
         self.grid_columnconfigure(1, weight=1)
