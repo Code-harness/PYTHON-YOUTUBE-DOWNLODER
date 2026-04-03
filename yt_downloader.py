@@ -69,20 +69,41 @@ def format_eta(seconds):
 
 def get_video_info(url: str):
     """
-    Fetch video/playlist metadata without downloading.
-    Useful for previewing title, playlist size, etc.
+    Fetch lightweight video/playlist metadata without downloading.
+    Much faster for previews.
     """
     url = clean_youtube_url(url)
 
     options = {
         'quiet': True,
         'skip_download': True,
-        'extract_flat': False,
+        'extract_flat': 'in_playlist',  # faster for playlists
+        'ignoreerrors': True,
     }
 
     with YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=False)
-        return info
+        return ydl.extract_info(url, download=False)
+
+
+def get_fast_title(url: str):
+    """
+    Get a fast title/playlist label for UI without doing deep extraction.
+    """
+    try:
+        info = get_video_info(url)
+
+        if not info:
+            return "Unknown"
+
+        if info.get('_type') == 'playlist':
+            title = info.get('title', 'Unknown Playlist')
+            count = len(info.get('entries', []) or [])
+            return f"Playlist: {title} ({count} videos)"
+
+        return info.get('title', 'Unknown Video')
+
+    except Exception:
+        return "Loading..."
 
 
 def download_video(
@@ -160,16 +181,14 @@ def download_video(
         'ignoreerrors': True,
         'progress_hooks': [hook],
         'logger': Logger(),
+        'concurrent_fragment_downloads': 4,
+        'retries': 10,
+        'fragment_retries': 10,
     }
 
+    # Fast title preview only (lightweight)
+    if title_callback:
+        title_callback(get_fast_title(url))
+
     with YoutubeDL(options) as ydl:
-        # Extract info first so GUI can show title before download starts
-        info = ydl.extract_info(url, download=False)
-
-        if title_callback:
-            if info.get('_type') == 'playlist':
-                title_callback(f"Playlist: {info.get('title', 'Unknown Playlist')}")
-            else:
-                title_callback(info.get('title', 'Unknown Video'))
-
         ydl.download([url])
