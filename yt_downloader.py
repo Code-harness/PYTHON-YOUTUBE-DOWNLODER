@@ -191,4 +191,6 @@ def download_video(
         title_callback(get_fast_title(url))
 
     with YoutubeDL(options) as ydl:
-        ydl.download([url])
+        ydl.download([url]) 
+        
+        
