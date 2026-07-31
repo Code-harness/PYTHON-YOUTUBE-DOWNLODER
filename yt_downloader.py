@@ -1,5 +1,6 @@
 # yt_downloader.py
 import os
+import re
 from yt_dlp import YoutubeDL
 from urllib.parse import urlparse, parse_qs
 
@@ -7,6 +8,17 @@ from urllib.parse import urlparse, parse_qs
 class DownloadCancelled(Exception):
     """Raised when the user cancels the download."""
     pass
+
+
+# Quality label -> max height cap (None = uncapped / best available, up to 8K)
+QUALITY_PRESETS = {
+    "Best Available": None,
+    "4K (2160p)": 2160,
+    "1440p (QHD)": 1440,
+    "1080p (FHD)": 1080,
+    "720p (HD)": 720,
+    "480p": 480,
+}
 
 
 def clean_youtube_url(url: str) -> str:
@@ -24,6 +36,16 @@ def clean_youtube_url(url: str) -> str:
         return f"https://www.youtube.com/watch?v={qs['v'][0]}"
 
     return url.strip()
+
+
+def is_valid_youtube_url(url: str) -> bool:
+    """
+    Basic sanity check that the string looks like a YouTube URL.
+    """
+    if not url:
+        return False
+    pattern = r'^(https?://)?(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com)/.+'
+    return bool(re.match(pattern, url.strip(), re.IGNORECASE))
 
 
 def is_playlist_url(url: str) -> bool:
@@ -67,6 +89,20 @@ def format_eta(seconds):
     return f"{mins:02}:{secs:02}"
 
 
+def format_filesize(num_bytes):
+    """
+    Convert raw byte count into readable size text.
+    """
+    if not num_bytes:
+        return "--"
+    num_bytes = float(num_bytes)
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if num_bytes < 1024:
+            return f"{num_bytes:.1f} {unit}"
+        num_bytes /= 1024
+    return f"{num_bytes:.1f} TB"
+
+
 def get_video_info(url: str):
     """
     Fetch lightweight video/playlist metadata without downloading.
@@ -106,6 +142,29 @@ def get_fast_title(url: str):
         return "Loading..."
 
 
+def _build_format_string(quality: str) -> str:
+    """
+    Build a yt-dlp format selector that actually grabs the best available
+    resolution rather than being hard-capped at 1080p.
+
+    Key fix: the old selector forced ext=mp4 on the video stream, which on
+    YouTube silently throws away the true best quality (4K/1440p and most
+    modern high-bitrate streams are served as VP9/AV1 in a WebM container,
+    not H.264/mp4). We now select on resolution only and let
+    merge_output_format handle remuxing to mp4 afterward.
+    """
+    max_height = QUALITY_PRESETS.get(quality, None)
+
+    if max_height:
+        return (
+            f'bestvideo[height<={max_height}]+bestaudio/'
+            f'best[height<={max_height}]'
+        )
+
+    # No cap -> true best available, including 4K/8K sources
+    return 'bestvideo+bestaudio/best'
+
+
 def download_video(
     url,
     folder,
@@ -114,6 +173,7 @@ def download_video(
     cancel_flag=None,
     title_callback=None,
     log_callback=None,
+    quality="Best Available",
 ):
     """
     Download YouTube content.
@@ -126,11 +186,15 @@ def download_video(
     - cancel_flag: function() -> bool, returns True if download should stop
     - title_callback: function(title: str), updates current title
     - log_callback: function(message: str), sends log messages to UI
+    - quality: one of QUALITY_PRESETS keys, controls max resolution
     """
     url = clean_youtube_url(url)
 
     if not url:
         raise ValueError("No URL provided")
+
+    if not is_valid_youtube_url(url):
+        raise ValueError("That doesn't look like a valid YouTube URL")
 
     playlist_detected = is_playlist_url(url)
 
@@ -172,8 +236,14 @@ def download_video(
             if log_callback and msg.strip():
                 log_callback(f"ERROR: {msg}")
 
+    format_string = _build_format_string(quality)
+
     options = {
-        'format': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
+        'format': format_string,
+        # Prefer the highest resolution / best codec available; mp4 is only
+        # used as a final tiebreaker so we don't discard higher-quality
+        # webm/av1 streams the way a hard ext=mp4 filter would.
+        'format_sort': ['res', 'fps', 'hdr:12', 'codec:vp9.2', 'codec:av01', 'br'],
         'merge_output_format': 'mp4',
         'outtmpl': outtmpl,
         'noplaylist': noplaylist,
@@ -191,6 +261,4 @@ def download_video(
         title_callback(get_fast_title(url))
 
     with YoutubeDL(options) as ydl:
-        ydl.download([url]) 
-        
-        
+        ydl.download([url])
