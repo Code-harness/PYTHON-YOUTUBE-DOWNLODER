@@ -1,6 +1,18 @@
 {
   "folder": "/home/goodman/Downloads/MOVIES/JULY 2026",
   "mode": "playlist",
-  "quality": "1080p (FHD)",
-  "theme": "Dark"
+  "quality": "Best Available",
+  "codec": "Auto",
+  "container": "mp4",
+  "audio_only": false,
+  "audio_format": "mp3",
+  "audio_quality": "192",
+  "embed_thumbnail": false,
+  "embed_metadata": true,
+  "subtitles": false,
+  "auto_subtitles": false,
+  "subtitle_langs": "en",
+  "cookies_browser": "firefox",
+  "po_token": "",
+  "theme": "System"
 }

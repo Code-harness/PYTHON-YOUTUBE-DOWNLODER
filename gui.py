@@ -11,18 +11,26 @@ from yt_downloader import (
     format_speed,
     format_eta,
     is_valid_youtube_url,
+    get_available_qualities,
     QUALITY_PRESETS,
+    CODEC_FILTERS,
+    AUDIO_FORMATS,
+    AUDIO_QUALITIES,
+    CONTAINERS,
 )
+
+BROWSER_OPTIONS = ["None", "chrome", "firefox", "edge", "brave", "opera", "vivaldi", "safari"]
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "3.0.0"
 
-# Settings are stored next to the app so preferences survive restarts
 SETTINGS_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "settings.json"
 )
+
+DEFAULT_QUALITY_LABELS = list(QUALITY_PRESETS.keys())
 
 
 def load_settings():
@@ -30,6 +38,18 @@ def load_settings():
         "folder": os.path.join(os.path.expanduser("~"), "Downloads"),
         "mode": "playlist",
         "quality": "Best Available",
+        "codec": "Auto",
+        "container": "mp4",
+        "audio_only": False,
+        "audio_format": "mp3",
+        "audio_quality": "192",
+        "embed_thumbnail": False,
+        "embed_metadata": True,
+        "subtitles": False,
+        "auto_subtitles": False,
+        "subtitle_langs": "en",
+        "cookies_browser": "None",
+        "po_token": "",
         "theme": "Dark",
     }
     try:
@@ -68,26 +88,30 @@ class App(ctk.CTk):
         self.settings = load_settings()
 
         self.title("TubeStream Downloader Pro")
-        self.geometry("960x700")
-        self.minsize(900, 650)
+        self.geometry("1040x760")
+        self.minsize(980, 700)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.cancel_requested = False
         self.last_folder = self.settings["folder"]
+
+        # Maps a quality dropdown label -> int height or None (for "Best
+        # Available"). Populated with real per-video data on detection.
+        self.quality_value_map = {label: h for label, h in QUALITY_PRESETS.items()}
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
         self._build_sidebar()
         self._build_main()
+        self._sync_audio_only_state()
 
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
     def _build_sidebar(self):
-        self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
+        self.sidebar = ctk.CTkScrollableFrame(self, width=230, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_propagate(False)
 
         self.logo_label = ctk.CTkLabel(
             self.sidebar,
@@ -101,15 +125,13 @@ class App(ctk.CTk):
             text="High-quality YouTube downloads",
             font=ctk.CTkFont(size=11),
             text_color="gray60",
-            wraplength=160,
+            wraplength=180,
             justify="center",
         )
-        self.tagline_label.pack(pady=(0, 30))
+        self.tagline_label.pack(pady=(0, 24))
 
         # Mode
-        ctk.CTkLabel(self.sidebar, text="Download Mode", anchor="w").pack(
-            fill="x", padx=20, pady=(0, 4)
-        )
+        self._section_label("Download Mode")
         self.mode_var = ctk.StringVar(value=self.settings["mode"])
         self.mode_menu = ctk.CTkOptionMenu(
             self.sidebar,
@@ -117,25 +139,152 @@ class App(ctk.CTk):
             variable=self.mode_var,
             command=lambda _: self._persist_settings(),
         )
-        self.mode_menu.pack(fill="x", padx=20, pady=(0, 20))
+        self.mode_menu.pack(fill="x", padx=20, pady=(0, 18))
 
-        # Quality
-        ctk.CTkLabel(self.sidebar, text="Video Quality", anchor="w").pack(
-            fill="x", padx=20, pady=(0, 4)
+        # Audio only toggle
+        self.audio_only_var = ctk.BooleanVar(value=self.settings["audio_only"])
+        self.audio_only_check = ctk.CTkCheckBox(
+            self.sidebar,
+            text="Audio Only (extract)",
+            variable=self.audio_only_var,
+            command=self._on_audio_only_toggle,
         )
+        self.audio_only_check.pack(fill="x", padx=20, pady=(0, 14))
+
+        # --- Video-only controls ---
+        self.video_section = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.video_section.pack(fill="x")
+
+        self._section_label("Video Quality", parent=self.video_section)
         self.quality_var = ctk.StringVar(value=self.settings["quality"])
         self.quality_menu = ctk.CTkOptionMenu(
-            self.sidebar,
-            values=list(QUALITY_PRESETS.keys()),
+            self.video_section,
+            values=DEFAULT_QUALITY_LABELS,
             variable=self.quality_var,
             command=lambda _: self._persist_settings(),
         )
-        self.quality_menu.pack(fill="x", padx=20, pady=(0, 20))
+        self.quality_menu.pack(fill="x", padx=20, pady=(0, 8))
+
+        self.detect_btn = ctk.CTkButton(
+            self.video_section,
+            text="Detect Available Qualities",
+            height=30,
+            font=ctk.CTkFont(size=12),
+            command=self.detect_qualities,
+        )
+        self.detect_btn.pack(fill="x", padx=20, pady=(0, 18))
+
+        self._section_label("Codec", parent=self.video_section)
+        self.codec_var = ctk.StringVar(value=self.settings["codec"])
+        self.codec_menu = ctk.CTkOptionMenu(
+            self.video_section,
+            values=list(CODEC_FILTERS.keys()),
+            variable=self.codec_var,
+            command=lambda _: self._persist_settings(),
+        )
+        self.codec_menu.pack(fill="x", padx=20, pady=(0, 18))
+
+        self._section_label("Container", parent=self.video_section)
+        self.container_var = ctk.StringVar(value=self.settings["container"])
+        self.container_menu = ctk.CTkOptionMenu(
+            self.video_section,
+            values=CONTAINERS,
+            variable=self.container_var,
+            command=lambda _: self._persist_settings(),
+        )
+        self.container_menu.pack(fill="x", padx=20, pady=(0, 18))
+
+        # --- Audio-only controls ---
+        self.audio_section = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+
+        self._section_label("Audio Format", parent=self.audio_section)
+        self.audio_format_var = ctk.StringVar(value=self.settings["audio_format"])
+        self.audio_format_menu = ctk.CTkOptionMenu(
+            self.audio_section,
+            values=AUDIO_FORMATS,
+            variable=self.audio_format_var,
+            command=lambda _: self._persist_settings(),
+        )
+        self.audio_format_menu.pack(fill="x", padx=20, pady=(0, 18))
+
+        self._section_label("Audio Quality (kbps)", parent=self.audio_section)
+        self.audio_quality_var = ctk.StringVar(value=self.settings["audio_quality"])
+        self.audio_quality_menu = ctk.CTkOptionMenu(
+            self.audio_section,
+            values=AUDIO_QUALITIES,
+            variable=self.audio_quality_var,
+            command=lambda _: self._persist_settings(),
+        )
+        self.audio_quality_menu.pack(fill="x", padx=20, pady=(0, 18))
+
+        # --- Extras ---
+        self._section_label("Extras")
+        self.thumbnail_var = ctk.BooleanVar(value=self.settings["embed_thumbnail"])
+        ctk.CTkCheckBox(
+            self.sidebar,
+            text="Embed thumbnail",
+            variable=self.thumbnail_var,
+            command=self._persist_settings,
+        ).pack(fill="x", padx=20, pady=(0, 8))
+
+        self.metadata_var = ctk.BooleanVar(value=self.settings["embed_metadata"])
+        ctk.CTkCheckBox(
+            self.sidebar,
+            text="Embed metadata",
+            variable=self.metadata_var,
+            command=self._persist_settings,
+        ).pack(fill="x", padx=20, pady=(0, 8))
+
+        self.subtitles_var = ctk.BooleanVar(value=self.settings["subtitles"])
+        ctk.CTkCheckBox(
+            self.sidebar,
+            text="Download subtitles",
+            variable=self.subtitles_var,
+            command=self._persist_settings,
+        ).pack(fill="x", padx=20, pady=(0, 8))
+
+        self.auto_subtitles_var = ctk.BooleanVar(value=self.settings["auto_subtitles"])
+        ctk.CTkCheckBox(
+            self.sidebar,
+            text="Include auto-generated subs",
+            variable=self.auto_subtitles_var,
+            command=self._persist_settings,
+        ).pack(fill="x", padx=20, pady=(0, 8))
+
+        self._section_label("Subtitle Languages")
+        self.subtitle_langs_var = ctk.StringVar(value=self.settings["subtitle_langs"])
+        self.subtitle_langs_entry = ctk.CTkEntry(
+            self.sidebar,
+            textvariable=self.subtitle_langs_var,
+            placeholder_text="en,fr,es",
+        )
+        self.subtitle_langs_entry.pack(fill="x", padx=20, pady=(0, 18))
+        self.subtitle_langs_entry.bind(
+            "<FocusOut>", lambda _e: self._persist_settings()
+        )
+
+        self._section_label("Browser Cookies (fixes low quality)")
+        self.cookies_browser_var = ctk.StringVar(value=self.settings["cookies_browser"])
+        self.cookies_browser_menu = ctk.CTkOptionMenu(
+            self.sidebar,
+            values=BROWSER_OPTIONS,
+            variable=self.cookies_browser_var,
+            command=lambda _: self._persist_settings(),
+        )
+        self.cookies_browser_menu.pack(fill="x", padx=20, pady=(0, 18))
+
+        self._section_label("PO Token (advanced, optional)")
+        self.po_token_var = ctk.StringVar(value=self.settings.get("po_token", ""))
+        self.po_token_entry = ctk.CTkEntry(
+            self.sidebar,
+            textvariable=self.po_token_var,
+            placeholder_text="Leave blank unless cookies aren't enough",
+        )
+        self.po_token_entry.pack(fill="x", padx=20, pady=(0, 18))
+        self.po_token_entry.bind("<FocusOut>", lambda _e: self._persist_settings())
 
         # Theme
-        ctk.CTkLabel(self.sidebar, text="Theme", anchor="w").pack(
-            fill="x", padx=20, pady=(0, 4)
-        )
+        self._section_label("Theme")
         self.theme_menu = ctk.CTkOptionMenu(
             self.sidebar,
             values=["Dark", "Light", "System"],
@@ -145,10 +294,6 @@ class App(ctk.CTk):
         self.theme_menu.set(self.settings["theme"])
         ctk.set_appearance_mode(self.settings["theme"])
 
-        # Spacer + version footer
-        spacer = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        spacer.pack(fill="both", expand=True)
-
         self.version_label = ctk.CTkLabel(
             self.sidebar,
             text=f"v{APP_VERSION}",
@@ -156,6 +301,11 @@ class App(ctk.CTk):
             text_color="gray50",
         )
         self.version_label.pack(pady=14)
+
+    def _section_label(self, text, parent=None):
+        ctk.CTkLabel(parent or self.sidebar, text=text, anchor="w").pack(
+            fill="x", padx=20, pady=(0, 4)
+        )
 
     def _build_main(self):
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -231,6 +381,9 @@ class App(ctk.CTk):
 
         self.eta_label = ctk.CTkLabel(self.stats_frame, text="ETA: --")
         self.eta_label.pack(side="left", padx=(0, 24))
+
+        self.size_label = ctk.CTkLabel(self.stats_frame, text="Size: --")
+        self.size_label.pack(side="left", padx=(0, 24))
 
         self.percent_label = ctk.CTkLabel(self.stats_frame, text="0%")
         self.percent_label.pack(side="left")
@@ -310,6 +463,18 @@ class App(ctk.CTk):
                 "folder": self.folder_path.get().strip() or self.last_folder,
                 "mode": self.mode_var.get(),
                 "quality": self.quality_var.get(),
+                "codec": self.codec_var.get(),
+                "container": self.container_var.get(),
+                "audio_only": self.audio_only_var.get(),
+                "audio_format": self.audio_format_var.get(),
+                "audio_quality": self.audio_quality_var.get(),
+                "embed_thumbnail": self.thumbnail_var.get(),
+                "embed_metadata": self.metadata_var.get(),
+                "subtitles": self.subtitles_var.get(),
+                "auto_subtitles": self.auto_subtitles_var.get(),
+                "subtitle_langs": self.subtitle_langs_var.get(),
+                "cookies_browser": self.cookies_browser_var.get(),
+                "po_token": self.po_token_var.get(),
                 "theme": self.theme_menu.get(),
             }
         )
@@ -318,6 +483,18 @@ class App(ctk.CTk):
     def _on_theme_change(self, value):
         ctk.set_appearance_mode(value)
         self._persist_settings()
+
+    def _on_audio_only_toggle(self):
+        self._sync_audio_only_state()
+        self._persist_settings()
+
+    def _sync_audio_only_state(self):
+        if self.audio_only_var.get():
+            self.video_section.pack_forget()
+            self.audio_section.pack(fill="x", after=self.audio_only_check)
+        else:
+            self.audio_section.pack_forget()
+            self.video_section.pack(fill="x", after=self.audio_only_check)
 
     def on_close(self):
         self._persist_settings()
@@ -367,6 +544,65 @@ class App(ctk.CTk):
 
         self.after(0, append)
 
+    def detect_qualities(self):
+        url = self.url_entry.get().strip()
+
+        if not url or not is_valid_youtube_url(url):
+            self.update_status("Error: Enter a valid URL before detecting", "#e74c3c")
+            return
+
+        self.detect_btn.configure(state="disabled", text="Detecting...")
+        self.update_status("Probing available qualities...", "#f1c40f")
+
+        def worker():
+            try:
+                info = get_available_qualities(url)
+                self.after(0, lambda: self._apply_detected_qualities(info))
+            except Exception as e:
+                msg = str(e)
+                self.after(
+                    0,
+                    lambda: self.update_status(
+                        f"Detection failed, using standard presets: {msg}", "#e67e22"
+                    ),
+                )
+            finally:
+                self.after(
+                    0,
+                    lambda: self.detect_btn.configure(
+                        state="normal", text="Detect Available Qualities"
+                    ),
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_detected_qualities(self, info):
+        heights = info.get("video_heights", [])
+
+        if not heights:
+            self.update_status("No video streams found for that URL", "#e74c3c")
+            return
+
+        labels = ["Best Available"]
+        self.quality_value_map = {"Best Available": None}
+
+        for h in heights:
+            label = f"{h}p (Detected)"
+            labels.append(label)
+            self.quality_value_map[label] = h
+
+        self.quality_menu.configure(values=labels)
+        self.quality_var.set(labels[1] if len(labels) > 1 else labels[0])
+        self._persist_settings()
+
+        self.update_title(info.get("title", "Unknown Video"))
+        self.update_status(
+            f"Detected {len(heights)} quality option(s) for this video", "#2ecc71"
+        )
+        self.update_log(
+            f"Available resolutions: {', '.join(str(h) + 'p' for h in heights)}"
+        )
+
     def cancel_download(self):
         self.cancel_requested = True
         self.update_status("Cancelling download...", "#e74c3c")
@@ -381,7 +617,10 @@ class App(ctk.CTk):
         url = self.url_entry.get().strip()
         folder = self.folder_path.get().strip()
         mode = self.mode_var.get()
-        quality = self.quality_var.get()
+        audio_only = self.audio_only_var.get()
+
+        quality_label = self.quality_var.get()
+        quality = self.quality_value_map.get(quality_label, quality_label)
 
         if not url:
             self.update_status("Error: Please enter a URL", "#e74c3c")
@@ -405,14 +644,21 @@ class App(ctk.CTk):
         self.progress_bar.set(0)
         self.speed_label.configure(text="Speed: --")
         self.eta_label.configure(text="ETA: --")
+        self.size_label.configure(text="Size: --")
         self.percent_label.configure(text="0%")
 
-        if mode == "playlist":
-            self.update_status("Preparing playlist download...", "#f1c40f")
+        if audio_only:
+            self.update_status("Preparing audio extraction...", "#f1c40f")
+            self.update_log(
+                f"Starting {mode} audio extraction "
+                f"({self.audio_format_var.get()}, {self.audio_quality_var.get()}kbps)..."
+            )
         else:
-            self.update_status("Preparing single video download...", "#f1c40f")
-
-        self.update_log(f"Starting {mode} download at quality: {quality}...")
+            self.update_status(f"Preparing {mode} download...", "#f1c40f")
+            self.update_log(
+                f"Starting {mode} download at {quality_label} "
+                f"[{self.codec_var.get()} / {self.container_var.get()}]..."
+            )
 
         threading.Thread(
             target=self.run_download,
@@ -437,6 +683,10 @@ class App(ctk.CTk):
                         0,
                         lambda: self.update_status(f"Downloading... {pct}%", "#3498db"),
                     )
+                    size_text = (
+                        f"{downloaded / (1024*1024):.1f} / {total / (1024*1024):.1f} MB"
+                    )
+                    self.after(0, lambda: self.size_label.configure(text=f"Size: {size_text}"))
 
                 self.after(
                     0, lambda: self.speed_label.configure(text=f"Speed: {format_speed(speed)}")
@@ -458,6 +708,22 @@ class App(ctk.CTk):
                 title_callback=lambda title: self.after(0, lambda: self.update_title(title)),
                 log_callback=self.update_log,
                 quality=quality,
+                codec_preference=self.codec_var.get(),
+                container=self.container_var.get(),
+                audio_only=self.audio_only_var.get(),
+                audio_format=self.audio_format_var.get(),
+                audio_quality=self.audio_quality_var.get(),
+                embed_thumbnail=self.thumbnail_var.get(),
+                embed_metadata=self.metadata_var.get(),
+                subtitles=self.subtitles_var.get(),
+                auto_subtitles=self.auto_subtitles_var.get(),
+                subtitle_langs=self.subtitle_langs_var.get(),
+                cookies_from_browser=(
+                    None
+                    if self.cookies_browser_var.get() == "None"
+                    else self.cookies_browser_var.get()
+                ),
+                po_token=self.po_token_var.get().strip() or None,
             )
 
             if self.cancel_requested:
@@ -485,6 +751,7 @@ class App(ctk.CTk):
         self.progress_bar.set(0)
         self.speed_label.configure(text="Speed: --")
         self.eta_label.configure(text="ETA: --")
+        self.size_label.configure(text="Size: --")
         self.percent_label.configure(text="0%")
 
 
